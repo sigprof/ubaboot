@@ -117,24 +117,26 @@
 
 ; USB commands
 ;
-; The SETUP handling code exploits the fact that for all requests the upper
-; four bits of bRequest are zero and the lower four bits of bmRequestType are
-; also zero. So the two values can be bit-wise OR'ed and compared at the same
-; time against a single command value. This saves space vs. separate compares.
+; The SETUP handling code exploits the fact that for all requests that are
+; implemented by this code the upper four bits of bRequest are zero and the
+; bits 1...4 of bmRequestType are also zero. So the two values can be shifted,
+; bit-wise OR'ed and compared at the same time against a single command value.
+; This saves space vs. separate compares.
 ;
-; Note that this requires all requests to be DEVICE requests because the lower
-; four bits of bmRequestType are used to identify the interface or endpoint for
-; other transaction types.
-#define CMD_GET_DESC    (RD_STD_DEV | GET_DESCRIPTOR)
-#define CMD_SET_ADDR    (WR_STD_DEV | SET_ADDRESS)
-#define CMD_SET_CONF    (WR_STD_DEV | SET_CONFIGURATION)
-#define CMD_GET_SIGRD   (RD_VEND_DEV | GET_SIGNATURE)
-#define CMD_GET_PMEM    (RD_VEND_DEV | GET_PROGMEM)
-#define CMD_SET_PMEM    (WR_VEND_DEV | SET_PROGMEM)
-#define CMD_REBOOT      (WR_VEND_DEV | REBOOT)
-#define CMD_GET_EEPROM  (RD_VEND_DEV | GET_EEPROM)
-#define CMD_SET_EEPROM  (WR_VEND_DEV | SET_EEPROM)
-#define CMD_GET_LOCK    (RD_VEND_DEV | GET_LOCK)
+; Note that this requires all requests to be DEVICE or INTERFACE requests,
+; because the lower five bits of bmRequestType are used to identify the
+; interface or endpoint for other transaction types, and recipient codes other
+; than DEVICE or INTERFACE use bits beyond 0.
+#define CMD_GET_DESC    (RD_STD_DEV | (GET_DESCRIPTOR << 1))
+#define CMD_SET_ADDR    (WR_STD_DEV | (SET_ADDRESS << 1))
+#define CMD_SET_CONF    (WR_STD_DEV | (SET_CONFIGURATION << 1))
+#define CMD_GET_SIGRD   (RD_VEND_DEV | (GET_SIGNATURE << 1))
+#define CMD_GET_PMEM    (RD_VEND_DEV | (GET_PROGMEM << 1))
+#define CMD_SET_PMEM    (WR_VEND_DEV | (SET_PROGMEM << 1))
+#define CMD_REBOOT      (WR_VEND_DEV | (REBOOT << 1))
+#define CMD_GET_EEPROM  (RD_VEND_DEV | (GET_EEPROM << 1))
+#define CMD_SET_EEPROM  (WR_VEND_DEV | (SET_EEPROM << 1))
+#define CMD_GET_LOCK    (RD_VEND_DEV | (GET_LOCK << 1))
 
 
 ; USB control endpoint state machine values
@@ -458,17 +460,17 @@ copy_setup:
 
 	; Parse setup packet
 
-	; STALL if bmRequestType has any bit 0-5 set
+	; STALL if bmRequestType has any bit 1-4 set
 	;       or bRequest      has any bit 4-7 set
 	;
 	; The command value is the bit-wise OR of these two values where
-	;   bits 0-3 = bits 0-3 of bRequest
-	;   bits 4-5 = 0
-	;   bits 6-7 = bits 6-7 of bmRequestType
+	;   bit  0   = bit 0 of bmRequestType
+	;   bits 1-4 = bits 0-3 of bRequest
+	;   bits 5-7 = bits 5-7 of bmRequestType
 
-	; if ((bmRequestType & 0x3f) != 0 || (bRequest & 0xf0) != 0) goto stall
+	; if ((bmRequestType & 0x1e) != 0 || (bRequest & 0xf0) != 0) goto stall
 	movw r24, r2
-	andi r24, 0x3f
+	andi r24, 0x1e
 	brne stall
 	andi r25, 0xf0   ; r25 set by movw
 	brne stall
@@ -480,7 +482,8 @@ copy_setup:
 	movw r30, r4
 
 	; See USB commands above
-	; cmd = bmRequestType | bRequest
+	; cmd = bmRequestType | (bRequest << 1)
+	lsl r3
 	or r2, r3
 	mov r24, r2
 
