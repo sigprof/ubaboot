@@ -33,10 +33,25 @@ SECTIONS {
         dev_desc_size = _usbdesc_device_end - _usbdesc_device_begin;
 
         _usbdesc_config_begin = .;
-        *(.usbdesc.config)
+        *(.usbdesc.config_1)
+        _usbdesc_hid_begin = .;
+        *(.usbdesc.hid)
+        _usbdesc_hid_end = .;
+        *(.usbdesc.hid_input_ep)
         _usbdesc_config_end = .;
 
         conf_desc = _usbdesc_config_begin;
         conf_desc_size = _usbdesc_config_end - _usbdesc_config_begin;
+
+        hid_desc = _usbdesc_hid_begin;
+        hid_desc_size = _usbdesc_hid_end - _usbdesc_hid_begin;
+
+        _usbdesc_hid_report_begin = .;
+        *(.usbdesc.hid_report)
+        _usbdesc_hid_report_end = .;
+
+        hid_report_desc = _usbdesc_hid_report_begin;
+        hid_report_desc_size = _usbdesc_hid_report_end - _usbdesc_hid_report_begin;
+
     } > FLASH = 0xFF
 }

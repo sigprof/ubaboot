@@ -92,8 +92,12 @@
 ; USB standard bmRequestType values
 #define WR_STD_DEV   0
 #define WR_VEND_DEV  0x40
+#define WR_CLS_IF    0x21
 #define RD_STD_DEV   0x80
+#define RD_STD_IF    0x81
 #define RD_VEND_DEV  0xc0
+#define RD_VEND_DEV  0xc0
+#define RD_CLS_IF    0xa1
 
 ; USB standard bRequest values
 #define SET_ADDRESS        5
@@ -101,8 +105,13 @@
 #define SET_CONFIGURATION  9
 
 ; USB bDescriptorType values
-#define DEVICE_DESCRIPTOR  1
-#define CONFIG_DESCRIPTOR  2
+#define DEVICE_DESCRIPTOR      1
+#define CONFIG_DESCRIPTOR      2
+#define HID_DESCRIPTOR         0x21
+#define HID_REPORT_DESCRIPTOR  0x22
+
+; HID bRequest values
+#define HID_SET_REPORT     9
 
 ; USB vendor-defined bRequest values
 ; These are the core bootloader requests
@@ -127,9 +136,22 @@
 ; because the lower five bits of bmRequestType are used to identify the
 ; interface or endpoint for other transaction types, and recipient codes other
 ; than DEVICE or INTERFACE use bits beyond 0.
+;
+; Additionally, the value 0x0f for bRequest is also rejected when handling
+; SETUP packets; this value will be used for internal command codes.
 #define CMD_GET_DESC    (RD_STD_DEV | (GET_DESCRIPTOR << 1))
 #define CMD_SET_ADDR    (WR_STD_DEV | (SET_ADDRESS << 1))
 #define CMD_SET_CONF    (WR_STD_DEV | (SET_CONFIGURATION << 1))
+#define CMD_SET_REPORT  (WR_CLS_IF | (HID_SET_REPORT << 1))
+#define CMD_GET_IF_DESC (RD_STD_IF | (GET_DESCRIPTOR << 1))
+
+; Continuation packet for SET_REPORT while writing to program memory.
+#define CMD_WR_PMEM_CONT (0x00 | (0x0f << 1))
+
+; Continuation packet for SET_REPORT containing a reboot command.
+#define CMD_REBOOT_CONT  (0x01 | (0x0f << 1))
+
+#if 0
 #define CMD_GET_SIGRD   (RD_VEND_DEV | (GET_SIGNATURE << 1))
 #define CMD_GET_PMEM    (RD_VEND_DEV | (GET_PROGMEM << 1))
 #define CMD_SET_PMEM    (WR_VEND_DEV | (SET_PROGMEM << 1))
@@ -137,6 +159,7 @@
 #define CMD_GET_EEPROM  (RD_VEND_DEV | (GET_EEPROM << 1))
 #define CMD_SET_EEPROM  (WR_VEND_DEV | (SET_EEPROM << 1))
 #define CMD_GET_LOCK    (RD_VEND_DEV | (GET_LOCK << 1))
+#endif
 
 
 ; USB control endpoint state machine values
@@ -461,19 +484,19 @@ copy_setup:
 	; Parse setup packet
 
 	; STALL if bmRequestType has any bit 1-4 set
-	;       or bRequest      has any bit 4-7 set
+	;       or bRequest      is out of the 0...0x0e range
 	;
 	; The command value is the bit-wise OR of these two values where
 	;   bit  0   = bit 0 of bmRequestType
 	;   bits 1-4 = bits 0-3 of bRequest
 	;   bits 5-7 = bits 5-7 of bmRequestType
 
-	; if ((bmRequestType & 0x1e) != 0 || (bRequest & 0xf0) != 0) goto stall
+	; if ((bmRequestType & 0x1e) != 0 || (bRequest >= 0x0f) != 0) goto stall
 	movw r24, r2
 	andi r24, 0x1e
 	brne stall
-	andi r25, 0xf0   ; r25 set by movw
-	brne stall
+	cpi r25, 0x0f   ; r25 set by movw
+	brsh stall
 
 	; Setup memory pointer.
 	; Most commands want this, so do it unconditionally to save space.
@@ -489,6 +512,12 @@ copy_setup:
 
 	; Descriptor handling
 
+	; Ignore the difference between GET_DESCRIPTOR for device and interface
+	cpi r24, CMD_GET_IF_DESC
+	brne setup_get_desc
+	ldi r24, CMD_GET_DESC
+
+setup_get_desc:
 	; if (cmd == CMD_GET_DESC)
 	cpi r24, CMD_GET_DESC
 	brne setup_set_addr
@@ -509,13 +538,39 @@ copy_setup:
 setup_conf_desc:
 	; if (wValueH == CONFIG_DESCRIPTOR) {
 	cpi r25, CONFIG_DESCRIPTOR
-	brne stall
+	brne setup_hid_report_desc
 	;   // Setup reading config descriptor
 	;   size = sizeof(conf_desc)
 	ldi r26, lo8(conf_desc_size)
 	;   ptr = &conf_desc
 	ldi r30, lo8(conf_desc)
 	ldi r31, hi8(conf_desc)
+	; }
+	rjmp setup_desc_done
+
+setup_hid_report_desc:
+	; if (wValueH == HID_REPORT_DESCRIPTOR) {
+	cpi r25, HID_REPORT_DESCRIPTOR
+	brne setup_hid_desc
+	;   // Setup reading HID report descriptor
+	;   size = sizeof(hid_report_desc)
+	ldi r26, lo8(hid_report_desc_size)
+	;   ptr = &hid_report_desc
+	ldi r30, lo8(hid_report_desc)
+	ldi r31, hi8(hid_report_desc)
+	; }
+	rjmp setup_desc_done
+
+setup_hid_desc:
+	; if (wValueH == HID_DESCRIPTOR) {
+	cpi r25, HID_DESCRIPTOR
+	brne stall
+	;   // Setup reading HID class descriptor
+	;   size = sizeof(hid_desc)
+	ldi r26, lo8(hid_desc_size)
+	;   ptr = &hid_desc
+	ldi r30, lo8(hid_desc)
+	ldi r31, hi8(hid_desc)
 	; }
 	; rjmp omitted to save insn
 
@@ -528,10 +583,12 @@ setup_desc_done:
 	brcc setup_done_nolen
 	; rjmp omitted to save insn
 
+#if 0
 	; Set cmd = CMD_GET_DESC for program memory reads
 	; which are implemented exactly the same as descriptor reads
 setup_get_pmem_done:
 	ldi r24, CMD_GET_DESC
+#endif
 
 	; Common SETUP token finalization
 	; For non-descriptor control reads the host must always request
@@ -550,13 +607,6 @@ setup_done_nolen:
 	movw r2, r24
 	rjmp loop
 
-stall:
-	; Bad request: STALL endpoint
-	ldi r24, _BV(STALLRQ) | _BV(EPEN)
-	std y+YDISP(UECONX), r24
-	mov r3, ZERO_REG
-	rjmp loop
-
 	; The following commands are no-ops during setup
 	; See state machine handling below for specific behavior
 
@@ -570,6 +620,20 @@ setup_set_conf:
 	cpi r24, CMD_SET_CONF
 	breq setup_done
 
+setup_set_report:
+	; if (cmd == CMD_SET_REPORT)
+	cpi r24, CMD_SET_REPORT
+	breq setup_done
+	; rjmp omitted to save insn
+
+stall:
+	; Bad request: STALL endpoint
+	ldi r24, _BV(STALLRQ) | _BV(EPEN)
+	std y+YDISP(UECONX), r24
+	mov r3, ZERO_REG
+	rjmp loop
+
+#if 0
 setup_reboot:
 	; if (cmd == CMD_REBOOT)
 	cpi r24, CMD_REBOOT
@@ -670,6 +734,7 @@ setup_set_pmem:
 	; reset temporary page
 	rcall do_spm_rwwsre
 	rjmp setup_done
+#endif
 
 	; Endpoint state machine handling
 	;
@@ -720,12 +785,13 @@ rd_loop:
 
 	;     if (cmd == CMD_GET_DESC) {
 	cpi r24, CMD_GET_DESC
-	brne rd_eeprom
+	brne rd_next
 	;       UEDATX = pgm_read_byte(ptr++);
 	lpm r0, Z+
 	std y+YDISP(UEDATX), r0
 	;     }
 
+#if 0
 	; EEPROM memory reads
 
 rd_eeprom:
@@ -740,6 +806,7 @@ rd_eeprom:
 	in r0, _SFR_IO_ADDR(EEDR)
 	std y+YDISP(UEDATX), r0
 	;     }
+#endif
 rd_next:
 	;     len--;
 	sbiw r26, 1
@@ -762,6 +829,31 @@ wr_data:
 	; nb = UEBCLX
 	ldd r18, y+YDISP(UEBCLX)
 
+	; First OUT token of the SET_REPORT request - depending on the payload,
+	; it might be a program memory write or a reboot request.
+	cpi r24, CMD_SET_REPORT
+	brne wr_pmem_cont
+	subi r18, 2
+	brcs mask_intx
+	; Read page address from the packet data
+	ldd r30, y+YDISP(UEDATX)
+	ldd r31, y+YDISP(UEDATX)
+
+	; Handle the rest of OUT data as continuation
+	ldi r24, CMD_WR_PMEM_CONT
+
+	; Compare the address with 0xffff
+	adiw r30, 1
+	brne not_reboot
+	; Change the command to ignore the OUT data if this is a reboot request
+	ldi r24, CMD_REBOOT_CONT
+not_reboot:
+	sbiw r30, 1
+
+	; Clear the page write buffer before starting the write.
+	rcall do_spm_rwwsre
+
+wr_pmem_cont:
 	; Flash memory writes
 	; The temporary buffer is filled from the payload one *word* at a time.
 	;
@@ -776,9 +868,10 @@ wr_data:
 	; After incrementing ptr for one page, ptr points to the *beginning* of the
 	; page to program. No fixup adjustments are required.
 
-	; if (cmd == CMD_SET_PMEM) {
-	cpi r24, CMD_SET_PMEM
-	brne wr_eeprom
+	; if (cmd == CMD_WR_PMEM_CONT) {
+	cpi r24, CMD_WR_PMEM_CONT
+	brne mask_intx
+
 spm_wr_loop:
 	; for (; nb >= 2; nb -= 2) {
 	subi r18, 2
@@ -802,6 +895,8 @@ spm_wr_done:
 	mov r18, r30
 	andi r18, 0x7f
 	brne mask_intx
+	subi r30, 0x80
+	sbc r31, ZERO_REG
 	;   do_spm(PGERS|SPMEN)
 	ldi r19, _BV(PGERS)|_BV(SPMEN)
 	rcall do_spm
@@ -812,7 +907,9 @@ spm_wr_done:
 	;   do_spm(RWWSRE|SPMEN)
 	rcall do_spm_rwwsre
 	; }
+	; rjmp omitted to save insn
 
+#if 0
 	; EEPROM memory writes.
 	; The hardware allows atomic byte-wise erase+write so this is easy.
 	; Loops over the token payload writing each byte.
@@ -846,6 +943,8 @@ eeprom_wait:
 	;   }
 	; }
 	; rjmp omitted to save insn
+
+#endif
 
 	; Control write NAKINI: write finished
 	; Implements SET_ADDRESS and REBOOT
@@ -881,12 +980,12 @@ wr_status_end:
 	; Reboot to user code
 
 do_reboot:
-	;   if (cmd == CMD_REBOOT) {
-	cpi r24, CMD_REBOOT
-	brne state_end
-reboot_loop:
-	; trip watchdog for restart
-	rjmp reboot_loop
+	;   if (cmd == CMD_REBOOT_CONT) {
+	cpi r24, CMD_REBOOT_CONT
+	; infinite loop - trip watchdog for restart
+	breq do_reboot
+	; }
+	; rjmp omitted to save insn
 state_end:
 	;   }
 	;   state = SETUP
@@ -895,9 +994,9 @@ state_end:
 	; rjmp omitted to save insn
 
 mask_intx:
+	mov r2, r24
 	std y+YDISP(UEINTX), r16
 	rjmp loop
-
 
 ; Subroutines
 
