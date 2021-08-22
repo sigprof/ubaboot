@@ -917,12 +917,15 @@ eear_setup:
 	; Watchdog setup subroutine.
 	; inputs:
 	;   r18 = new WDTCSR
+	;   r29 = 0
 	; clobbers:
 	;   r19
+	;   r28
 set_wdt:
 	ldi r19, _BV(WDCE)|_BV(WDE)
-	sts WDTCSR, r19
-	sts WDTCSR, r18
+	ldi r28, _SFR_MEM_ADDR(WDTCSR)
+	st y, r19
+	st y, r18
 	ret
 
 
