@@ -145,21 +145,15 @@
 #define CMD_SET_REPORT  (WR_CLS_IF | (HID_SET_REPORT << 1))
 #define CMD_GET_IF_DESC (RD_STD_IF | (GET_DESCRIPTOR << 1))
 
-; Continuation packet for SET_REPORT while writing to program memory.
-#define CMD_WR_PMEM_CONT (0x00 | (0x0f << 1))
+; Continuation packet for which the data should be dropped.
+#define CMD_WR_DROP      0b00011110	// (0x00 | (0x0f << 1))
 
 ; Continuation packet for SET_REPORT containing a reboot command.
-#define CMD_REBOOT_CONT  (0x01 | (0x0f << 1))
+; This value must be equal to CMD_WR_DROP+1.
+#define CMD_REBOOT_CONT  0b00011111	// (0x01 | (0x0f << 1))
 
-#if 0
-#define CMD_GET_SIGRD   (RD_VEND_DEV | (GET_SIGNATURE << 1))
-#define CMD_GET_PMEM    (RD_VEND_DEV | (GET_PROGMEM << 1))
-#define CMD_SET_PMEM    (WR_VEND_DEV | (SET_PROGMEM << 1))
-#define CMD_REBOOT      (WR_VEND_DEV | (REBOOT << 1))
-#define CMD_GET_EEPROM  (RD_VEND_DEV | (GET_EEPROM << 1))
-#define CMD_SET_EEPROM  (WR_VEND_DEV | (SET_EEPROM << 1))
-#define CMD_GET_LOCK    (RD_VEND_DEV | (GET_LOCK << 1))
-#endif
+; Continuation packet for SET_REPORT while writing to program memory.
+#define CMD_WR_PMEM_CONT 0b00111110	// (0x20 | (0x0f << 1))
 
 
 ; USB control endpoint state machine values
@@ -228,6 +222,7 @@
 
 
 ; Program entry
+BOOTLOADER_START:
 
 ; Save and clear MCUSR
 ; WDRF must be cleared to disable the watchdog timer.
@@ -534,57 +529,36 @@ setup_get_desc:
 	; if (cmd == CMD_GET_DESC)
 	cpi r24, CMD_GET_DESC
 	brne setup_set_addr
+
 	; // GET_DESCRIPTOR command
-	; if (wValueH == DEVICE_DESCRIPTOR) {
+	; Copy wValueH (descriptor type) to a register usable with `cpi`.
 	mov r25, r5
-	cpi r25, DEVICE_DESCRIPTOR
-	;   // Setup reading device descriptor
-	brne setup_conf_desc
-	;   size = sizeof(dev_desc)
-	ldi r26, lo8(dev_desc_size)
-	;   ptr = &dev_desc
+	; Load the address for the device descriptor
 	ldi r30, lo8(dev_desc)
 	ldi r31, hi8(dev_desc)
-	; }
-	rjmp setup_desc_done
+	; Check whether the request if for DEVICE_DESCRIPTOR...
+	cpi r25, DEVICE_DESCRIPTOR
+load_size_and_setup_desc:
+	; Load the length of the descriptor from the first byte of the descriptor itself.
+	lpm r26, Z
+	breq setup_desc_done
 
-setup_conf_desc:
-	; if (wValueH == CONFIG_DESCRIPTOR) {
+	; Move the pointer from dev_desc to conf_desc
+	adiw r30, dev_desc_size
+	ldi r26, conf_desc_size
 	cpi r25, CONFIG_DESCRIPTOR
-	brne setup_hid_report_desc
-	;   // Setup reading config descriptor
-	;   size = sizeof(conf_desc)
-	ldi r26, lo8(conf_desc_size)
-	;   ptr = &conf_desc
-	ldi r30, lo8(conf_desc)
-	ldi r31, hi8(conf_desc)
-	; }
-	rjmp setup_desc_done
+	breq setup_desc_done
 
-setup_hid_report_desc:
-	; if (wValueH == HID_REPORT_DESCRIPTOR) {
-	cpi r25, HID_REPORT_DESCRIPTOR
-	brne setup_hid_desc
-	;   // Setup reading HID report descriptor
-	;   size = sizeof(hid_report_desc)
-	ldi r26, lo8(hid_report_desc_size)
-	;   ptr = &hid_report_desc
-	ldi r30, lo8(hid_report_desc)
-	ldi r31, hi8(hid_report_desc)
-	; }
-	rjmp setup_desc_done
-
-setup_hid_desc:
-	; if (wValueH == HID_DESCRIPTOR) {
+	; Move the pointer from conf_desc to hid_desc
+	adiw r30, hid_desc_offset_from_conf_desc
 	cpi r25, HID_DESCRIPTOR
+	breq load_size_and_setup_desc
+
+	; Move the pointer from hid_desc to hid_report_desc
+	adiw r30, hid_report_desc_offset_from_hid_desc
+	ldi r26, hid_report_desc_size
+	cpi r25, HID_REPORT_DESCRIPTOR
 	brne stall
-	;   // Setup reading HID class descriptor
-	;   size = sizeof(hid_desc)
-	ldi r26, lo8(hid_desc_size)
-	;   ptr = &hid_desc
-	ldi r30, lo8(hid_desc)
-	ldi r31, hi8(hid_desc)
-	; }
 	; rjmp omitted to save insn
 
 	; Descriptor reads can be short because host may read a prefix of either
@@ -595,13 +569,6 @@ setup_desc_done:
 	cpc r9, ZERO_REG
 	brcc setup_done_nolen
 	; rjmp omitted to save insn
-
-#if 0
-	; Set cmd = CMD_GET_DESC for program memory reads
-	; which are implemented exactly the same as descriptor reads
-setup_get_pmem_done:
-	ldi r24, CMD_GET_DESC
-#endif
 
 	; Common SETUP token finalization
 	; For non-descriptor control reads the host must always request
@@ -646,108 +613,6 @@ stall:
 	mov r3, ZERO_REG
 	rjmp loop
 
-#if 0
-setup_reboot:
-	; if (cmd == CMD_REBOOT)
-	cpi r24, CMD_REBOOT
-	breq setup_done
-
-setup_get_eeprom:
-	; if (cmd == CMD_GET_EEPROM)
-	cpi r24, CMD_GET_EEPROM
-	breq setup_done
-
-setup_set_eeprom:
-	; if (cmd == CMD_SET_EEPROM)
-	cpi r24, CMD_SET_EEPROM
-	breq setup_done
-
-	; Signature read
-	; This reads the bytes directly into UEDATX during setup
-	; The state machine read loop is not used
-
-setup_get_sigrd:
-	; if (cmd == CMD_GET_SIGRD)
-	cpi r24, CMD_GET_SIGRD
-	brne setup_get_lock
-	; read signature row via SIGRD bit
-	;   0000 = signature[0]
-	;   0002 = signature[0]
-	;   0004 = signature[0]
-	ldi r16, _BV(SIGRD)|_BV(SPMEN)
-	ldi r17, 2
-	ldi r18, 6
-	; fall-through to setup_rd_spm
-
-	; read special bytes through SPMCSR/LPM
-	; r16 = SPMCSR value
-	; r17 = lo(Z) stride
-	; r18 = lo(Z) limit
-setup_rd_spm:
-	; Z = 0
-	mov r30, ZERO_REG
-	mov r31, ZERO_REG
-	; do {
-setup_rd_spm_loop:
-	;   UEDATX = load byte from special SPM row
-	out _SFR_IO_ADDR(SPMCSR), r16
-	lpm r0, Z
-	std y+YDISP(UEDATX), r0
-	;   lo(Z) += stride
-	add r30, r17
-	; } while (lo(Z) != limit);
-	cp r30, r18
-	brne setup_rd_spm_loop
-	rjmp setup_done
-
-	; Lock/fuse read
-	; This also reads directly into UEDATX during setup
-	; The state machine read loop is not used
-
-setup_get_lock:
-	; if (cmd == CMD_GET_LOCK)
-	cpi r24, CMD_GET_LOCK
-	brne setup_get_pmem
-	; read fuse/lock bytes via BLBSET bit
-	;   0000 = low fuse
-	;   0001 = lock byte
-	;   0002 = ext fuse
-	;   0003 = high fuse
-	ldi r16, _BV(BLBSET)|_BV(SPMEN)
-	ldi r17, 1
-	ldi r18, 4
-	rjmp setup_rd_spm
-
-	; Read from program memory
-	; Nothing to do except set CMD_GET_DESC
-
-setup_get_pmem:
-	; if (cmd == CMD_GET_PMEM)
-	cpi r24, CMD_GET_PMEM
-	; same logic as CMD_GET_DESC
-	breq setup_get_pmem_done
-
-	; Write to program memory
-	; Enforces that pointer/length are page-aligned
-	; And decrements pointer by one page (see state machine below)
-
-setup_set_pmem:
-	; if (cmd == CMD_SET_PMEM)
-	cpi r24, CMD_SET_PMEM
-	brne stall
-	; if (lo(len) & 0x7f != 0) || (lo(ptr) & 0x7f) != 0) goto stall
-	mov r17, r26
-	or r17, r30
-	andi r17, 0x7f
-	brne stall
-	; move ptr back one page
-	; ptr -= 0x80
-	subi r30, 0x80
-	sbc r31, ZERO_REG
-	; reset temporary page
-	rcall do_spm_rwwsre
-	rjmp setup_done
-#endif
 
 	; Endpoint state machine handling
 	;
@@ -791,7 +656,7 @@ rd_data:
 rd_loop:
 	;   while (len) {
 	adiw r26, 0
-	breq state_end
+	breq wr_data
 
 	; Flash memory reads
 	; This implements both descriptor and program memory reads
@@ -804,22 +669,6 @@ rd_loop:
 	std y+YDISP(UEDATX), r0
 	;     }
 
-#if 0
-	; EEPROM memory reads
-
-rd_eeprom:
-	;     if (cmd == CMD_GET_EEPROM) {
-	cpi r24, CMD_GET_EEPROM
-	brne rd_next
-	;       eear_setup()
-	rcall eear_setup
-	;       EECR |= _BV(EERE)
-	sbi _SFR_IO_ADDR(EECR), EERE
-	;       UEDATX = EEDR
-	in r0, _SFR_IO_ADDR(EEDR)
-	std y+YDISP(UEDATX), r0
-	;     }
-#endif
 rd_next:
 	;     len--;
 	sbiw r26, 1
@@ -846,22 +695,79 @@ wr_data:
 	; it might be a program memory write or a reboot request.
 	cpi r24, CMD_SET_REPORT
 	brne wr_pmem_cont
-	subi r18, 2
+
+	; Drop the rest of OUT data if the parameter check fails.
+	ldi r24, CMD_WR_DROP
+
+	; Ensure that the buffer contains at least 8 bytes (this should work
+	; even for a low-speed device), then add back 6 (only 2 bytes are
+	; consumed immediately, but the subsequent parsing code may need more).
+	subi r18, 8
 	brcs mask_intx
+	subi r18, -6
+
 	; Read page address from the packet data
 	ldd r30, y+YDISP(UEDATX)
 	ldd r31, y+YDISP(UEDATX)
 
-	; Handle the rest of OUT data as continuation
-	ldi r24, CMD_WR_PMEM_CONT
+	; Check that the address does not overlap the bootloader (just checking
+	; the high byte is enough).
+	cpi r31, hi8(BOOTLOADER_START)
+	brlo pmem_address_in_range
 
-	; Compare the address with 0xffff
-	adiw r30, 1
-	brne not_reboot
-	; Change the command to ignore the OUT data if this is a reboot request
-	ldi r24, CMD_REBOOT_CONT
-not_reboot:
-	sbiw r30, 1
+	; Address is out of the allowed range, but it might be a special value:
+	;   0xffff - reboot request
+	;   0xfffe - EEPROM write
+
+	; Add 2, changing the special address values as follows:
+	;  0xfffe -> 0x0000, carry flag set
+	;  0xffff -> 0x0001, carry flag set
+	;  any other value -> carry flag clear
+	adiw r30, 2
+	breq wr_eeprom_start
+	; Here the carry flag is set if the address was 0xffff, and clear in
+	; all other possible cases.  Add that carry flag to r24 to change its
+	; value from CMD_WR_DROP to CMD_REBOOT_CONT if the reboot request was
+	; received.
+	adc r24, ZERO_REG
+	rjmp mask_intx
+
+wr_eeprom_start:
+	; EEPROM byte write operation.  3 bytes of parameters are expected in
+	; the OUT data after the special address value:
+	;   address (2 bytes, low byte first)
+	;   data (1 byte)
+
+	; Read EEPROM address from the packet data,
+	ldd r30, y+YDISP(UEDATX)
+	ldd r31, y+YDISP(UEDATX)
+
+	; Read the data byte to be written from the packet data.
+	ldd r0, y+YDISP(UEDATX)
+
+	; Start the EEPROM write operation.
+	out _SFR_IO_ADDR(EEARL), r30
+	out _SFR_IO_ADDR(EEARH), r31
+	out _SFR_IO_ADDR(EEDR), r0
+	sbi _SFR_IO_ADDR(EECR), EEMPE
+	sbi _SFR_IO_ADDR(EECR), EEPE
+
+	; Wait for the EEPROM write to complete.
+eeprom_wait:
+	wdr
+	sbic _SFR_IO_ADDR(EECR), EEPE
+	rjmp eeprom_wait
+
+	rjmp mask_intx
+
+pmem_address_in_range:
+	; Check that the address is aligned to the page size
+	mov r19, r30
+	andi r19, 0x7f
+	brne mask_intx
+
+	; Address check passed - write the rest of OUT data to flash.
+	ldi r24, CMD_WR_PMEM_CONT
 
 	; Clear the page write buffer before starting the write.
 	rcall do_spm_rwwsre
@@ -888,7 +794,7 @@ wr_pmem_cont:
 spm_wr_loop:
 	; for (; nb >= 2; nb -= 2) {
 	subi r18, 2
-	brcs spm_wr_done
+	brcs mask_intx
 	; r0 = UEDATX
 	ldd r0, y+YDISP(UEDATX)
 	; r1 = UEDATX
@@ -896,20 +802,28 @@ spm_wr_loop:
 	; do_spm(SPMEN)
 	ldi r19, _BV(SPMEN)
 	rcall do_spm
+
 	; ptr += 2
-	adiw r30, 2
-	rjmp spm_wr_loop
+	; Only the low byte needs to be incremented, because the write
+	; operation covers only one flash page and the start address is aligned
+	; to the page size.
+	subi r30, -2
+	; Check for the end of page with 0xff -> 0x00 transition - if the add
+	; instruction have been used above, such transition would result in the
+	; carry flag being set, but because AVR does not actually have an add
+	; instruction with an immediate operand, the sense of carry flag is
+	; inverted.
+	brcc spm_wr_end_of_page
+	; Check for the end of page with 0x7f -> 0x80 transition - this is
+	; detected as a two’s complement overflow.
+	brvc spm_wr_loop
 
-	; Erase and write the page if buffer filled.
-	; ptr now points at the *beginning* of the page.
+spm_wr_end_of_page:
 
-spm_wr_done:
-	; if (lo(ptr) & 0x7f == 0) {
-	mov r18, r30
-	andi r18, 0x7f
-	brne mask_intx
+	; Erase and write the page after the buffer has been filled.
+
+	; Move the pointer back to the start of the page.
 	subi r30, 0x80
-	sbc r31, ZERO_REG
 	;   do_spm(PGERS|SPMEN)
 	ldi r19, _BV(PGERS)|_BV(SPMEN)
 	rcall do_spm
@@ -919,45 +833,19 @@ spm_wr_done:
 	;   // re-enable read-while-write section
 	;   do_spm(RWWSRE|SPMEN)
 	rcall do_spm_rwwsre
+
+	; In theory doing "ldi r24, CMD_WR_DROP" to discard any further OUT
+	; data would be the right thing here.  However, if someone would keep
+	; sending the data (breaking the HID spec), the only result of that
+	; would be that the bytes would be written to the same flash page
+	; (because the pointer is moved back to its start), so at worst the
+	; same page would be overwritten repeatedly, and doing anything more
+	; annoying, such as overwriting the bootloader itself, would not be
+	; possible.
+
 	; }
 	; rjmp omitted to save insn
 
-#if 0
-	; EEPROM memory writes.
-	; The hardware allows atomic byte-wise erase+write so this is easy.
-	; Loops over the token payload writing each byte.
-
-wr_eeprom:
-	; if (cmd == CMD_SET_EEPROM)
-	cpi r24, CMD_SET_EEPROM
-	brne mask_intx
-wr_eeprom_loop:
-	;   while (len--) {
-	subi r18, 1
-	brcs mask_intx
-	;     eear_setup()
-	rcall eear_setup
-	;     EEDR = UEDATX
-	ldd r0, y+YDISP(UEDATX)
-	out _SFR_IO_ADDR(EEDR), r0
-	;     EECR |= _BV(EEMPM)
-	sbi _SFR_IO_ADDR(EECR), EEMPE
-	;     EECR |= _BV(EEPE)
-	sbi _SFR_IO_ADDR(EECR), EEPE
-	;     // wait for programming
-	;     do {
-eeprom_wait:
-	;       wdr();
-	wdr
-	;     } while (EECR & _BV(EEPE));
-	sbic _SFR_IO_ADDR(EECR), EEPE
-	rjmp eeprom_wait
-	rjmp wr_eeprom_loop
-	;   }
-	; }
-	; rjmp omitted to save insn
-
-#endif
 
 	; Control write NAKINI: write finished
 	; Implements SET_ADDRESS and REBOOT
@@ -1012,21 +900,6 @@ mask_intx:
 	rjmp loop
 
 ; Subroutines
-
-	; EEPROM address setup subroutine
-	; Sets EEAR = ptr++
-	;
-	; inputs:
-	;   r30:r31 = address
-	; outputs:
-	;   r30:r31 = address + 1
-	; clobbers:
-	;   none
-eear_setup:
-	out _SFR_IO_ADDR(EEARL), r30
-	out _SFR_IO_ADDR(EEARH), r31
-	adiw r30, 1
-	ret
 
 
 	; Watchdog setup subroutine.
