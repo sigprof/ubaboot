@@ -43,8 +43,8 @@
 // http://www.usb.org/developers/vendor/
 // https://en.wikipedia.org/wiki/USB_Implementers_Forum#Obtaining_a_vendor_ID
 // These should be written as C literals.
-//#define VENDOR_ID 0xnnnn
-//#define PRODUCT_ID 0xnnnn
+#define VENDOR_ID 0x03eb
+#define PRODUCT_ID 0x2067
 
 // Choose which oscillator you are using:
 //
@@ -58,21 +58,21 @@
 //       See the datasheet for details. To select this mode set OSC_MHZ_8 and
 //       uncomment USB_LOW_SPEED below.
 //#define OSC_MHZ_8
-//#define OSC_MHZ_16
+#define OSC_MHZ_16
 
 // If you want to use USB low speed mode, uncomment the following line.
 // This is required for the RC oscillator.
 //#define USB_LOW_SPEED
 
 // If you need the on-chip USB voltage regulator, uncomment the following line.
-//#define USB_REGULATOR
+#define USB_REGULATOR
 
 // If you would like a status LED, uncomment this line. Also uncomment the
 // appropriate lines for DDRLED, PORTLED, and LEDPIN below.
-//#define USE_LED
-//#define LED_DDR_REG    DDRx
-//#define LED_PORT_REG   PORTx
-//#define LED_IONUM      n
+#define USE_LED
+#define LED_DDR_REG    DDRD
+#define LED_PORT_REG   PORTD
+#define LED_IONUM      5
 
 // Sample configurations follow.
 // Note: You must still set VENDOR_ID and PRODUCT_ID above.
