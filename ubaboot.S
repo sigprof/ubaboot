@@ -388,12 +388,25 @@ loop:
 	sbrs r0, EORSTI
 	rjmp blink
 
-	;   // reset USB module and setup endpoint
-	;   UECONX = EPEN;
-	ldi r24, _BV(EPEN)
-	std y+YDISP(UECONX), r24
-	;   UECFG1X = _BV(EPSIZE1) | _BV(EPSIZE0) | _BV(ALLOC);
+	; Set up endpoint 1 as interrupt in (the host may poll it even when the
+	; HID device does not declare any input reports).
+
+	ldi r30, 1
+	std y+YDISP(UENUM), r30
+#if _BV(EPEN) != 1
+	ldi r30, _BV(EPEN)
+#endif
+	std y+YDISP(UECONX), r30
+	ldi r24, _BV(EPTYPE1) | _BV(EPTYPE0) | _BV(EPDIR)
+	std y+YDISP(UECFG0X), r24
 	ldi r24, _BV(EPSIZE1) | _BV(EPSIZE0) | _BV(ALLOC)
+	std y+YDISP(UECFG1X), r24
+
+	; Set up endpoint 0 as control endpoint.
+	std y+YDISP(UENUM), ZERO_REG
+	;   UECONX = EPEN;
+	std y+YDISP(UECONX), r30
+	;   UECFG1X = _BV(EPSIZE1) | _BV(EPSIZE0) | _BV(ALLOC);
 	std y+YDISP(UECFG1X), r24
 
 	;   // clear interrupts
