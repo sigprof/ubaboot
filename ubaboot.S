@@ -155,6 +155,9 @@
 ; Continuation packet for SET_REPORT while writing to program memory.
 #define CMD_WR_PMEM_CONT 0b00111110	// (0x20 | (0x0f << 1))
 
+; Continuation packet for SET_REPORT while writing to EEPROM.
+#define CMD_WR_EEP_CONT  0b00111111	// (0x20 | (0x0f << 1))
+
 
 ; USB control endpoint state machine values
 ;
@@ -694,17 +697,14 @@ wr_data:
 	; First OUT token of the SET_REPORT request - depending on the payload,
 	; it might be a program memory write or a reboot request.
 	cpi r24, CMD_SET_REPORT
-	brne wr_pmem_cont
+	brne wr_eep_cont
 
 	; Drop the rest of OUT data if the parameter check fails.
 	ldi r24, CMD_WR_DROP
 
-	; Ensure that the buffer contains at least 8 bytes (this should work
-	; even for a low-speed device), then add back 6 (only 2 bytes are
-	; consumed immediately, but the subsequent parsing code may need more).
-	subi r18, 8
-	brcs mask_intx
-	subi r18, -6
+	; Ensure that the buffer contains at least 2 bytes.
+	subi r18, 2
+	brcs mask_intx_1
 
 	; Read page address from the packet data
 	ldd r30, y+YDISP(UEDATX)
@@ -717,54 +717,37 @@ wr_data:
 
 	; Address is out of the allowed range, but it might be a special value:
 	;   0xffff - reboot request
-	;   0xfffe - EEPROM write
 
 	; Add 2, changing the special address values as follows:
-	;  0xfffe -> 0x0000, carry flag set
-	;  0xffff -> 0x0001, carry flag set
+	;  0xffff -> 0x0000, carry flag set
 	;  any other value -> carry flag clear
-	adiw r30, 2
-	breq wr_eeprom_start
+	adiw r30, 1
 	; Here the carry flag is set if the address was 0xffff, and clear in
 	; all other possible cases.  Add that carry flag to r24 to change its
 	; value from CMD_WR_DROP to CMD_REBOOT_CONT if the reboot request was
 	; received.
 	adc r24, ZERO_REG
-	rjmp mask_intx
-
-wr_eeprom_start:
-	; EEPROM byte write operation.  3 bytes of parameters are expected in
-	; the OUT data after the special address value:
-	;   address (2 bytes, low byte first)
-	;   data (1 byte)
-
-	; Read EEPROM address from the packet data,
-	ldd r30, y+YDISP(UEDATX)
-	ldd r31, y+YDISP(UEDATX)
-
-	; Read the data byte to be written from the packet data.
-	ldd r0, y+YDISP(UEDATX)
-
-	; Start the EEPROM write operation.
-	out _SFR_IO_ADDR(EEARL), r30
-	out _SFR_IO_ADDR(EEARH), r31
-	out _SFR_IO_ADDR(EEDR), r0
-	sbi _SFR_IO_ADDR(EECR), EEMPE
-	sbi _SFR_IO_ADDR(EECR), EEPE
-
-	; Wait for the EEPROM write to complete.
-eeprom_wait:
-	wdr
-	sbic _SFR_IO_ADDR(EECR), EEPE
-	rjmp eeprom_wait
-
+mask_intx_1:
 	rjmp mask_intx
 
 pmem_address_in_range:
+	; Check whether the request is actually for the EEPROM write
+	; FIXME: need to check bit 0 too
+	sbrs r30, 1
+	rjmp not_eeprom_write
+
+eeprom_write_start:
+	; Clear special bits in the address
+	cbr r30, 0x03
+
+	ldi r24, CMD_WR_EEP_CONT
+	rjmp wr_eep_cont
+
+not_eeprom_write:
 	; Check that the address is aligned to the page size
-	mov r19, r30
-	andi r19, 0x7f
-	brne mask_intx
+	;;mov r19, r30
+	;;andi r19, 0x7f
+	;;brne mask_intx
 
 	; Address check passed - write the rest of OUT data to flash.
 	ldi r24, CMD_WR_PMEM_CONT
@@ -772,6 +755,9 @@ pmem_address_in_range:
 	; Clear the page write buffer before starting the write.
 	rcall do_spm_rwwsre
 
+wr_eep_cont:
+	cpi r24, CMD_WR_EEP_CONT
+	breq spm_wr_loop
 wr_pmem_cont:
 	; Flash memory writes
 	; The temporary buffer is filled from the payload one *word* at a time.
@@ -799,6 +785,32 @@ spm_wr_loop:
 	ldd r0, y+YDISP(UEDATX)
 	; r1 = UEDATX
 	ldd r1, y+YDISP(UEDATX)
+
+	cpi r24, CMD_WR_EEP_CONT
+	brne pmem_write
+
+	; Start the EEPROM write operation.
+	out _SFR_IO_ADDR(EEARL), r30
+	out _SFR_IO_ADDR(EEARH), r31
+	out _SFR_IO_ADDR(EEDR), r0
+	sbi _SFR_IO_ADDR(EECR), EEMPE
+	sbrc r1, 0
+	sbi _SFR_IO_ADDR(EECR), EEPE
+
+	; Wait for the EEPROM write to complete.
+eeprom_wait:
+	wdr
+	sbic _SFR_IO_ADDR(EECR), EEPE
+	rjmp eeprom_wait
+
+	; ptr += 1
+	; Only the low byte needs to be incremented, because the write
+	; operation is supposed to be aligned to the protocol-defined EEPROM
+	; page size (64 bytes for devices with 128 byte flash pages).
+	subi r30, -1
+	rjmp spm_wr_loop
+
+pmem_write:
 	; do_spm(SPMEN)
 	ldi r19, _BV(SPMEN)
 	rcall do_spm
